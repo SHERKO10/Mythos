@@ -1,0 +1,32 @@
+# Binaries & Build Outputs
+dist/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Rust (Agent)
+agent/target/
+**/*.rs.bk
+
+# Go (Server)
+server/mythos-server
+server/mythos-console
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Env
+.env

