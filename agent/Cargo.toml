@@ -19,6 +19,7 @@ rand = "0.8"
 base64 = "0.21"
 uuid = { version = "1.6", features = ["v4"] }
 libc = "0.2"
+windows-sys = { version = "0.48", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_Security", "Win32_System_Kernel"] }
 
 [profile.release]
 # Binaire minimal et optimisé — difficile à analyser statiquement

