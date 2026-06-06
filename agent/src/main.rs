@@ -15,6 +15,8 @@ mod transport;
 mod evasion;
 mod commands;
 pub mod inject;
+pub mod recon;
+
 
 use transport::{BeaconData, RegisterRequest, Session};
 use evasion::check_environment;

