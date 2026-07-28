@@ -20,13 +20,17 @@
 
 use windows::{
     core::*,
-    Win32::Foundation::*,
     Win32::System::Com::*,
     Win32::Media::MediaFoundation::*,
     Win32::Graphics::Imaging::*,
     Win32::System::Com::StructuredStorage::*,
     Win32::UI::Shell::*,
 };
+use std::sync::mpsc;
+use std::time::Duration;
+
+// Alias explicite pour éviter le conflit avec windows::core::Result<T> (1 param)
+type StdResult<T, E> = std::result::Result<T, E>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Structures de résultat
@@ -215,7 +219,10 @@ pub fn try_capture() -> WebcamResult {
     }
 
     // Phase 2 : Initialiser COM
-    let com_result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    // COINIT_APARTMENTTHREADED est requis pour les capture devices WMF :
+    // les drivers de webcam utilisent des COM proxies STA. Avec MULTITHREADED,
+    // ActivateObject() peut freezer indéfiniment sur certains systèmes.
+    let com_result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     if let Err(e) = com_result {
         if e.code().0 != 0x00000001u32 as i32 {
             // S_FALSE (0x1) = déjà initialisé, c'est OK
@@ -356,7 +363,6 @@ unsafe fn do_capture(defenses: &mut Vec<String>) -> WebcamResult {
     let _ = media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     let _ = media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
 
-    // Appliquer le media type au reader (stream vidéo = index 0xFFFFFFFF pour "first video")
     let set_type_result = reader.SetCurrentMediaType(
         MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
         None,
@@ -380,73 +386,104 @@ unsafe fn do_capture(defenses: &mut Vec<String>) -> WebcamResult {
             let h = (packed & 0xFFFFFFFF) as u32;
             (w, h)
         }
-        Err(_) => (640u32, 480u32), // Fallback
+        Err(_) => (640u32, 480u32), // Fallback dimensions
     };
 
     // ── 8. Lire un sample (frame) ────────────────────────────────────────────
     // On tente plusieurs fois car le premier frame peut être noir (warm-up webcam)
+    // Chaque tentative est limitée à 8s via thread+channel pour éviter que
+    // ReadSample bloque indéfiniment (problème connu sur certains drivers webcam)
     let mut raw_rgb32: Vec<u8> = Vec::new();
     let mut capture_ok = false;
 
-    for attempt in 0..5 {
-        let mut stream_index: u32 = 0;
-        let mut stream_flags: u32 = 0;
-        let mut timestamp: i64 = 0;
-        let mut sample: Option<IMFSample> = None;
+    for attempt in 0..5usize {
+        // Utilise StdResult pour éviter le conflit avec windows::core::Result<T>
+        let (tx, rx) = mpsc::channel::<StdResult<Vec<u8>, String>>();
+        let reader_ptr = &reader as *const IMFSourceReader as usize;
+        let tx_clone = tx.clone();
 
-        let read_result = reader.ReadSample(
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
-            0,
-            Some(&mut stream_index),
-            Some(&mut stream_flags),
-            Some(&mut timestamp),
-            Some(&mut sample),
-        );
+        std::thread::spawn(move || {
+            let reader_ref = unsafe { &*(reader_ptr as *const IMFSourceReader) };
+            let mut si: u32 = 0;
+            let mut sf: u32 = 0;
+            let mut ts: i64 = 0;
+            let mut smp: Option<IMFSample> = None;
 
-        if read_result.is_err() {
-            if attempt == 4 {
-                return WebcamResult::failure(
-                    format!("ReadSample échoué après 5 tentatives : {:?}", read_result),
-                    defenses.clone(),
-                );
+            let read_result = unsafe {
+                reader_ref.ReadSample(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    0,
+                    Some(&mut si),
+                    Some(&mut sf),
+                    Some(&mut ts),
+                    Some(&mut smp),
+                )
+            };
+
+            if read_result.is_err() {
+                let _ = tx_clone.send(StdResult::Err(format!("ReadSample err: {:?}", read_result)));
+                return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            continue;
-        }
 
-        let sample = match sample {
-            Some(s) => s,
-            None => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                continue;
+            let smp = match smp {
+                Some(s) => s,
+                None => {
+                    let _ = tx_clone.send(StdResult::Err("Sample null".to_string()));
+                    return;
+                }
+            };
+
+            let buffer = match unsafe { smp.ConvertToContiguousBuffer() } {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = tx_clone.send(StdResult::Err(format!("ConvertToContiguousBuffer: {:?}", e)));
+                    return;
+                }
+            };
+
+            let mut data_ptr: *mut u8 = std::ptr::null_mut();
+            let mut max_len: u32 = 0;
+            let mut current_len: u32 = 0;
+
+            if unsafe { buffer.Lock(&mut data_ptr, Some(&mut max_len), Some(&mut current_len)) }.is_ok() {
+                if !data_ptr.is_null() && current_len > 0 {
+                    let data = unsafe {
+                        std::slice::from_raw_parts(data_ptr, current_len as usize).to_vec()
+                    };
+                    unsafe { let _ = buffer.Unlock(); }
+                    let _ = tx_clone.send(StdResult::Ok(data));
+                    return;
+                }
+                unsafe { let _ = buffer.Unlock(); }
             }
-        };
+            let _ = tx_clone.send(StdResult::Err("Buffer lock ou données vides".to_string()));
+        });
 
-        // Convertir le sample en buffer contigu
-        let contiguous_result: Result<IMFMediaBuffer> = sample.ConvertToContiguousBuffer();
-        let buffer = match contiguous_result {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-
-        // Verrouiller le buffer pour accéder aux octets bruts
-        let mut data_ptr: *mut u8 = std::ptr::null_mut();
-        let mut max_len: u32 = 0;
-        let mut current_len: u32 = 0;
-
-        if buffer.Lock(&mut data_ptr, Some(&mut max_len), Some(&mut current_len)).is_ok() {
-            if !data_ptr.is_null() && current_len > 0 {
-                raw_rgb32 = std::slice::from_raw_parts(data_ptr, current_len as usize).to_vec();
+        match rx.recv_timeout(Duration::from_secs(8)) {
+            Ok(StdResult::Ok(data)) => {
+                raw_rgb32 = data;
                 capture_ok = true;
+                break;
             }
-            let _ = buffer.Unlock();
+            Ok(StdResult::Err(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {
+                if attempt == 4 {
+                    return WebcamResult::failure(
+                        "ReadSample timeout (>8s) après 5 tentatives — webcam bloquée ou déjà utilisée ?",
+                        defenses.clone(),
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if attempt == 4 {
+                    return WebcamResult::failure(
+                        "Thread de capture déconnecté inattendu",
+                        defenses.clone(),
+                    );
+                }
+            }
         }
 
-        if capture_ok {
-            break;
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
     if !capture_ok || raw_rgb32.is_empty() {

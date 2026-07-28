@@ -26,6 +26,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -266,6 +267,13 @@ func (a *OperatorAPI) createTask(c *gin.Context) {
 	if err := a.DB.CreateTask(task); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Intercepter la tâche sleep pour mettre à jour la DB immédiatement
+	if task.Type == "sleep" {
+		if sleepVal, err := strconv.Atoi(task.Payload); err == nil && sleepVal > 0 {
+			a.DB.UpdateAgentSleep(agentID, sleepVal)
+		}
 	}
 
 	a.DB.LogEvent("task_created", agentID, fmt.Sprintf("%v", operatorID),

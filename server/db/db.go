@@ -209,6 +209,15 @@ func (db *Database) UpdateAgentLastSeen(agentID string) error {
 	return err
 }
 
+// UpdateAgentSleep — met à jour l'intervalle beacon d'un agent
+func (db *Database) UpdateAgentSleep(agentID string, sleep int) error {
+	_, err := db.conn.Exec(
+		`UPDATE agents SET beacon_int = ? WHERE id = ?`,
+		sleep, agentID,
+	)
+	return err
+}
+
 // MarkDeadAgents — marque comme "dead" les agents inactifs depuis trop longtemps
 func (db *Database) MarkDeadAgents(threshold time.Duration) error {
 	cutoff := time.Now().Add(-threshold)

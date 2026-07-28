@@ -98,6 +98,10 @@ Agent                                    Serveur
 | AES-256-GCM | Inspection TLS | Corps HTTP chiffré |
 | Sleep obfuscation | Scanner RAM EDR | Chiffrement mémoire pendant sleep |
 | Binaire strippé | Analyse statique | Pas de symboles de debug |
+| Hell's Gate | Hooks ntdll EDR | Syscalls directs via SSN dynamique |
+| Halo's Gate | Hooks multi-fonctions | Résolution SSN par voisinage si hooké |
+| Indirect syscall | Callstack analysis EDR | `syscall` exécuté depuis ntdll légitime |
+| API hashing (DJB2) | Strings analysis | Pas de noms Nt* en clair dans le binaire |
 
 ---
 
@@ -321,10 +325,11 @@ curl -X POST \
 - [x] DLL hijacking module (scan + deploy)
 - [x] Process hollowing
 - [x] Shellcode injection
+- [x] Direct syscalls (Hell's Gate / Halo's Gate) — bypass hooks ntdll
+- [x] ETW patching (EtwEventWrite)
+- [x] AMSI bypass (AmsiScanBuffer)
+- [x] Reconnaissance: Webcam snap (WMF/WIC)
 - [ ] Proxy DLL generator (génération automatique depuis le C2)
-- [ ] Direct syscalls (Hell's Gate) — bypass hooks ntdll
-- [ ] ETW patching
-- [ ] AMSI bypass
 - [ ] DNS tunneling listener
 - [ ] CDN redirectors (Cloudflare)
 - [ ] Console web (React)

